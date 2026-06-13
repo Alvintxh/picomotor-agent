@@ -1,0 +1,143 @@
+import requests
+import json
+import os
+import time
+import base64
+import mimetypes
+from PIL import Image
+import io
+import subprocess
+
+API_URL = os.environ.get('SHANGHAITECH_API_URL')
+API_KEY = os.environ.get('CHATGPT5p5_API_KEY')
+
+if not API_URL or not API_KEY:
+    raise Exception("请先配置环境变量 SHANGHAITECH_API_URL 与 CHATGPT5p5_API_KEY")
+
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}"
+}
+
+messages = []
+type_delay = 0.01
+
+
+def clipboard_img_to_b64():
+    proc = subprocess.Popen(["pngpaste", "-"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    png_bytes, err = proc.communicate()
+    if proc.returncode != 0 or len(png_bytes) < 100:
+        raise Exception(f"剪贴板无图片: {err.decode('utf-8', 'ignore')}")
+    img = Image.open(io.BytesIO(png_bytes))
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode("utf-8")
+    buf.close()
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def make_image_message(img_b64, question):
+    return {
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": question
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": img_b64
+                }
+            },
+        ]
+    }
+
+
+print("=== 交互指令说明 ===")
+print("q                     退出对话")
+print("img:/xxx/xx.jpg       读取本地图片文件")
+print("clipimg               剪贴板图片，默认提问：详细解读这张图片")
+print("clipimg:你的问题      剪贴板图片 + 自定义提问")
+print("普通文字直接输入聊天\n")
+
+while True:
+    user_input = input("你：").strip()
+    if user_input.lower() == 'q':
+        print("再见！")
+        break
+    if not user_input:
+        continue
+
+    if user_input.startswith("clipimg"):
+        question = user_input[7:].lstrip(":").strip() or "详细解读这张图片"
+        try:
+            img_b64 = clipboard_img_to_b64()
+            messages.append(make_image_message(img_b64, question))
+        except Exception as err:
+            print(f"剪贴板图片读取失败：{err}")
+            continue
+
+    elif user_input.startswith("img:"):
+        img_path = user_input[4:].strip()
+        try:
+            with open(img_path, "rb") as f:
+                raw_bytes = f.read()
+            mime_type, _ = mimetypes.guess_type(img_path)
+            if not mime_type or not mime_type.startswith("image/"):
+                mime_type = "image/jpeg"
+            b64_str = base64.b64encode(raw_bytes).decode("utf-8")
+            img_b64 = f"data:{mime_type};base64,{b64_str}"
+            messages.append(make_image_message(img_b64, "描述并分析这张图片"))
+        except Exception as err:
+            print(f"本地图片读取失败：{err}")
+            continue
+
+    else:
+        messages.append({"role": "user", "content": user_input})
+
+    payload = {"stream": True, "model": "GPT-5.5", "messages": messages}
+
+    response = requests.post(API_URL,
+                             headers=headers,
+                             json=payload,
+                             stream=True)
+
+    if response.status_code != 200:
+        print(f"API 错误 {response.status_code}: {response.text}")
+        messages.pop()
+        continue
+
+    print("AI：", end="", flush=True)
+    full_answer = ""
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        raw = line.decode("utf-8")
+        if not raw.startswith("data:"):
+            continue
+        json_str = raw[5:].strip()
+        if json_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(json_str)
+            delta = chunk["choices"][0]["delta"]
+            content = delta.get("content", "")
+            for char in content:
+                print(char, end="", flush=True)
+                time.sleep(type_delay)
+                full_answer += char
+            if chunk["choices"][0].get("finish_reason") == "stop":
+                break
+        except Exception:
+            continue
+
+    print("\n")
+    messages.append({"role": "assistant", "content": full_answer})
