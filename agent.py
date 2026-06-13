@@ -1,14 +1,16 @@
 import json
 import os
 import re
+import threading
 
 from openai import OpenAI
 
 import tools
+from display import print_motor_status
 from tools import TOOL_REGISTRY
 
-client = OpenAI(api_key=os.environ.get('DEEPSEEK_API_KEY'),
-                base_url="https://api.deepseek.com")
+client = OpenAI(api_key=os.environ.get('DEEPSEEK_API_KEY1'),
+                base_url=" https://genaiapi.shanghaitech.edu.cn/api/v1/star")
 
 SYSTEM_PROMPT = """你是一个专业的电机控制Agent。
 
@@ -61,10 +63,16 @@ def parse_action(text: str):
 
 
 def run_agent(user_prompt: str):
-    motor_state = "已连接" if tools.isconnected else "未连接"
+    motor_state = "已连接" if tools.connected else "未连接"
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"[当前电机状态：{motor_state}]\n{user_prompt}"},
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        },
+        {
+            "role": "user",
+            "content": f"[当前电机状态：{motor_state}]\n{user_prompt}"
+        },
     ]
 
     while True:
@@ -103,10 +111,11 @@ def run_agent(user_prompt: str):
 
         obs_text = f"Observation: {observation}"
         print(obs_text)
+        print_motor_status(tools.motors, tools.connected)
         messages.append({"role": "user", "content": obs_text})
 
 
-if __name__ == "__main__":
+def agent_loop():
     while True:
         try:
             user_input = input("\n请输入指令（输入 q 退出）：")
@@ -116,3 +125,10 @@ if __name__ == "__main__":
             break
         if user_input.strip():
             run_agent(user_input)
+
+
+if __name__ == "__main__":
+    from gui import run_gui
+    t = threading.Thread(target=agent_loop, daemon=True)
+    t.start()
+    run_gui()  # 必须在主线程运行（macOS Cocoa 限制）
